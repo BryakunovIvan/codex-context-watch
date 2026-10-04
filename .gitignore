@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.DS_Store
+.env
+.env.*
+
+# Local Codex logs, databases and exported reports are not project source.
+*.jsonl
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+report.json
+full-report.json
+reports/

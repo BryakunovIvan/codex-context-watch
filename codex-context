@@ -1,0 +1,5 @@
+#!/usr/bin/env python3
+"""Portable entrypoint: run directly from any directory."""
+from context_watch.cli import main
+
+raise SystemExit(main())
