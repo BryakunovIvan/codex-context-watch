@@ -7,7 +7,7 @@ import time
 
 from .cli import snapshot
 from .discovery import discover
-from .display import diagnostic_lines, diagnostic_summary, entry_detail, heading, safe, short
+from .display import FILE_MODES, diagnostic_lines, diagnostic_summary, entry_detail, heading, safe, short
 from .reader import RolloutReader
 from .views import related_entries, rows_for, VIEWS
 
@@ -108,11 +108,12 @@ def session_picker(screen, sessions):
 
 HELP = '''Codex Context Watch
 
-1–5 или ←→: размер / инструменты / скиллы / категории / события
+1–6 или ←→: размер / инструменты / скиллы / категории / события / файлы
 ↑↓ или j/k: выбрать запись; PgUp/PgDn: страница; Home/End: начало/конец
 Enter: полное содержимое записи; у группы — связанные вызовы и ответы
-/: поиск по полному тексту, инструменту, категории или пути скилла
+/: поиск по полному тексту, инструменту, категории или пути файла/скилла
 c: очистить поиск; h: история после сжатия / все исходные записи
+m: в виде «Файлы» переключить все файлы / только .md (включая .MD)
 s: выбрать другой чат; p: приостановить обновление; q: выход
 d: диагностика неполных, неизвестных и повреждённых данных
 ?: эта справка
@@ -127,6 +128,9 @@ d: диагностика неполных, неизвестных и повре
 Связь скилла выведена из команды чтения SKILL.md. Команда могла завершиться ошибкой.
 Если exec содержит несколько инструментов, общий ответ не распределяется между ними.
 Размеры таких скиллов и вложенных инструментов перекрываются; их нельзя складывать.
+Файлы: чтение из shell-команд и операции apply_patch, включая перемещение.
+Это предполагаемые операции; выполнение и успех не подтверждены. Enter: вызов и ответ.
+Произвольные команды, переменные и динамические пути не восстановлены.
 
 active — наблюдаемая история после последнего сжатия, а не точная копия запроса.
 history — исходные записи за весь лог; снимки replacement_history не добавляются второй раз.
@@ -139,9 +143,23 @@ def run(screen, reader, args, session):
         curses.curs_set(0)
     except curses.error:
         pass
+    file_colors = {}
+    try:
+        if curses.has_colors():
+            curses.start_color()
+            curses.use_default_colors()
+            for pair, (operation, color) in enumerate((('read', curses.COLOR_CYAN),
+                    ('create', curses.COLOR_GREEN), ('modify', curses.COLOR_YELLOW),
+                    ('delete', curses.COLOR_RED), ('move_from', curses.COLOR_YELLOW),
+                    ('move_to', curses.COLOR_YELLOW)), 1):
+                curses.init_pair(pair, color, -1)
+                file_colors[operation] = curses.color_pair(pair)
+    except curses.error:
+        file_colors = {}
     screen.keypad(True)
     view_index, selected, offset = 0, 0, 0
     scope, query, paused = args.scope, args.filter, False
+    file_mode = args.files
     last_poll, polls = 0.0, 0
     status = ''
     selected_key = None
@@ -159,7 +177,7 @@ def run(screen, reader, args, session):
                 return
         report = snapshot(reader, scope, session)
         view = VIEWS[view_index][0]
-        rows = rows_for(report, view, query)
+        rows = rows_for(report, view, query, file_mode)
         if selected_key is not None:
             selected = next((i for i, row in enumerate(rows) if row['key'] == selected_key), selected)
         selected = min(max(0, selected), max(0, len(rows) - 1))
@@ -173,18 +191,28 @@ def run(screen, reader, args, session):
             for y, line in enumerate(header[:7]):
                 put(screen, y, 0, line, curses.A_BOLD if y == 0 else 0)
             put(screen, 7, 0, ' | '.join(label for _, label in VIEWS), curses.A_REVERSE)
-            put(screen, 8, 0, f"{VIEWS[view_index][1]} | {'ПАУЗА' if paused else 'WATCH'} | {report.get('title') or ''} | поиск: {query or '—'} | {len(rows)} строк")
+            mode_note = f' | {FILE_MODES[file_mode]} (m)' if view == 'files' else ''
+            put(screen, 8, 0, f"{VIEWS[view_index][1]} | {'ПАУЗА' if paused else 'WATCH'}{mode_note} | {report.get('title') or ''} | поиск: {query or '—'} | {len(rows)} строк")
             visible = max(1, height - 12)
             if selected < offset:
                 offset = selected
             elif selected >= offset + visible:
                 offset = selected - visible + 1
             for y, row in enumerate(rows[offset:offset + visible], 9):
-                put(screen, y, 0, row['text'], curses.A_REVERSE if offset + y - 9 == selected else 0)
+                operations = row.get('operations', [])
+                operation = next((op for op in ('delete', 'modify', 'move_from', 'move_to', 'create', 'read')
+                                  if op in operations), None)
+                attr = file_colors.get(operation, 0)
+                if operation and operation != 'read':
+                    attr |= curses.A_BOLD
+                if offset + y - 9 == selected:
+                    attr |= curses.A_REVERSE
+                put(screen, y, 0, row['text'], attr)
             if not rows:
-                put(screen, 9, 0, 'Нет записей. Измените фильтр или дождитесь новых событий.')
+                empty = 'Нет файлов. m: .md/все | /: поиск' if view == 'files' else 'Нет записей. Измените фильтр или дождитесь новых событий.'
+                put(screen, 9, 0, empty)
             put(screen, height - 2, 0, (status + ' | ' if status else '') + diagnostic_summary(report))
-            put(screen, height - 1, 0, '1–5 вид | ↑↓ выбор | Enter открыть | / поиск | h история | s чат | p пауза | ? помощь | q выход', curses.A_REVERSE)
+            put(screen, height - 1, 0, '1–6 вид | m .md/все | ↑↓ выбор | Enter открыть | / поиск | h история | s чат | p пауза | ? помощь | q выход', curses.A_REVERSE)
         screen.refresh()
         screen.timeout(min(250, max(30, int(args.interval * 1000))))
         try:
@@ -194,7 +222,7 @@ def run(screen, reader, args, session):
         screen.timeout(-1)
         if key in ('q', '\x03'):
             return
-        if key in ('1', '2', '3', '4', '5'):
+        if key in tuple(str(i + 1) for i in range(len(VIEWS))):
             view_index = int(key) - 1
             selected, offset, selected_key = 0, 0, None
         elif key in (curses.KEY_LEFT, curses.KEY_RIGHT):
@@ -214,6 +242,9 @@ def run(screen, reader, args, session):
             selected_key = None
         elif key == 'p':
             paused = not paused
+        elif key == 'm' and view == 'files':
+            file_mode = 'md' if file_mode == 'all' else 'all'
+            selected, offset, selected_key = 0, 0, None
         elif key == 'h':
             scope = 'history' if scope == 'active' else 'active'
             selected, offset, selected_key = 0, 0, None

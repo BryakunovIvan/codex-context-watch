@@ -7,6 +7,16 @@ CATEGORY = {'base_instructions': 'Базовые инструкции', 'instruc
             'user': 'Пользователь', 'assistant': 'Ассистент', 'tool_call': 'Аргументы вызовов',
             'tool_output': 'Результаты инструментов', 'reasoning': 'Резюме рассуждений',
             'compaction_summary': 'Резюме сжатия'}
+FILE_OPERATIONS = {'read': 'Чтение', 'create': 'Создание', 'modify': 'Изменение',
+                   'delete': 'Удаление', 'move_from': 'Перемещение: источник',
+                   'move_to': 'Перемещение: назначение'}
+FILE_MODES = {'all': 'все файлы', 'md': 'только .md'}
+
+
+def file_operations(operations):
+    return ', '.join(FILE_OPERATIONS.get(op, op) for op in operations)
+
+
 LIMITATIONS = {
     'opaque_compaction': 'Сжатие содержит непрозрачный блок; его размер в токенах неизвестен.',
     'incomplete_compaction': 'Полная история после сжатия не записана; восстановление частичное.',
@@ -48,7 +58,20 @@ def matches(entry, query):
     needle = query.casefold()
     return not needle or any(needle in str(entry.get(field, '')).casefold()
                              for field in ('text', 'tool', 'label', 'category', 'call_id')) or any(
-                             needle in p.casefold() for p in entry.get('skill_paths', []))
+                             needle in p.casefold() for p in entry.get('skill_paths', [])) or any(
+                             needle in a['path'].casefold() for a in entry.get('file_accesses', []))
+
+
+def filtered_files(report, query='', file_mode='all'):
+    files = report.get('files', [])
+    if query:
+        paths = [f for f in files if query.casefold() in f['path'].casefold()]
+        if paths:
+            files = paths
+        else:
+            entry_ids = {e['id'] for e in report['entries'] if matches(e, query)}
+            files = [f for f in files if entry_ids.intersection(f['entry_ids'])]
+    return [f for f in files if f['path'].casefold().endswith('.md')] if file_mode == 'md' else files
 
 
 def report_json(report, full=False):
@@ -60,7 +83,9 @@ def report_json(report, full=False):
 
 def diagnostic_lines(report):
     lines = ['Оценка текста не включает невидимые схемы инструментов и служебную упаковку запроса.',
-             'Размеры скиллов могут перекрываться: общий вывод exec не распределён между чтениями.']
+             'Размеры скиллов могут перекрываться: общий вывод exec не распределён между чтениями.',
+             'Файлы распознаны по аргументам чтения и apply_patch; выполнение и успех не подтверждены.',
+             'Произвольные shell-команды, переменные и динамические пути файлов не восстановлены.']
     lines.extend(LIMITATIONS.get(key, key) for key in report['limitations'])
     if report['malformed_lines']:
         lines.append(f"Пропущено повреждённых строк JSON: {report['malformed_lines']}")
@@ -108,7 +133,7 @@ def heading(report):
     return lines
 
 
-def render_report(report, top=15, query=''):
+def render_report(report, top=15, query='', file_mode='all'):
     lines = heading(report)
     lines += ['', 'Категории:']
     for row in report['categories']:
@@ -134,6 +159,13 @@ def render_report(report, top=15, query=''):
             references = [p for p in skill.get('resources', []) if p != skill['path']]
             for resource in references:
                 lines.append('    ресурс: ' + resource)
+    if report.get('files'):
+        lines += ['', f'Файлы ({FILE_MODES[file_mode]}) — предполагаемые операции из аргументов инструментов:']
+        files = filtered_files(report, query, file_mode)
+        if not files:
+            lines.append('  Нет файлов для выбранного режима и поиска.')
+        for file in files[:top]:
+            lines.append(f"  {file_operations(file['operations'])} | блоков вызовов: {file['calls']} | {file['path']}")
     lines += [''] + diagnostic_lines(report)
     return safe('\n'.join(lines))
 
@@ -151,6 +183,8 @@ def entry_detail(entry, path):
         lines.append('Связь: ' + entry['attribution'])
     if entry.get('read_paths'):
         lines.append('Пути в командах чтения: ' + ', '.join(entry['read_paths']))
+    for access in entry.get('file_accesses', []):
+        lines.append(f"Файл (предположение): {file_operations([access['operation']])} | {access['path']}")
     if entry['media_blocks']:
         lines.append(f"Медиаблоков: {entry['media_blocks']} (не входят в оценку текста)")
     lines += ['', entry['text']]

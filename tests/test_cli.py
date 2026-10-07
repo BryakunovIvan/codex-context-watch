@@ -25,6 +25,66 @@ def write_session(path, text='hello', identity='chat-1'):
 
 
 class CliTests(unittest.TestCase):
+    def test_file_modes_in_report_watch_and_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'rollout.jsonl'
+            write_session(path)
+            with path.open('a') as file:
+                file.write(json.dumps({'type': 'response_item', 'payload': {
+                    'type': 'function_call', 'name': 'exec_command', 'call_id': 'x',
+                    'arguments': '{"cmd":"cat README.md Guide.MD code.py"}'}}) + '\n')
+            for command in ('report', 'watch'):
+                flags = ('--plain', '--once') if command == 'watch' else ()
+                for mode, count in (('all', 3), ('md', 2)):
+                    with self.subTest(command=command, mode=mode):
+                        result = self.run_cli(command, '--file', str(path), '--files', mode, *flags)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        section = result.stdout.split('Файлы (', 1)[1]
+                        self.assertIn('/project/README.md', section)
+                        self.assertIn('/project/Guide.MD', section)
+                        self.assertEqual(section.count('блоков вызовов:'), count)
+                        self.assertEqual('/project/code.py' in section, mode == 'all')
+            result = self.run_cli('watch', '--file', str(path), '--files', 'md', '--iterations', '1')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('Файлы (только .md)', result.stdout)
+            result = self.run_cli('report', '--file', str(path), '--files', 'md', '--json')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(json.loads(result.stdout)['files']), 3)
+            result = self.run_cli('report', '--file', str(path), '--files', 'bad')
+            self.assertEqual(result.returncode, 2)
+            self.assertNotIn('Traceback', result.stderr)
+
+    def test_file_report_json_inspect_and_plain_watch_without_tty(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'rollout.jsonl'
+            write_session(path)
+            records = [
+                {'type': 'response_item', 'payload': {'type': 'custom_tool_call',
+                    'name': 'apply_patch', 'call_id': 'patch',
+                    'input': '*** Begin Patch\n*** Add File: code.py\n+' + 'x' * 200 + '\n+secret fixture body\n*** End Patch'}},
+                {'type': 'response_item', 'payload': {'type': 'custom_tool_call_output',
+                    'call_id': 'patch', 'output': 'done'}},
+            ]
+            with path.open('a') as file:
+                file.write(''.join(json.dumps(r) + '\n' for r in records))
+            result = self.run_cli('report', '--file', str(path), '--json')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report['files'][0]['operations'], ['create'])
+            self.assertEqual(report['files'][0]['path'], '/project/code.py')
+            self.assertNotIn('secret fixture body', result.stdout)
+            self.assertNotIn('text', report['entries'][1])
+            result = self.run_cli('report', '--file', str(path), '--json', '--full')
+            self.assertIn('secret fixture body', result.stdout)
+            result = self.run_cli('inspect', '--file', str(path), '--item', 'e000002')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('Создание | /project/code.py', result.stdout)
+            for flags in (('--plain', '--once'), ('--iterations', '1')):
+                result = self.run_cli('watch', '--file', str(path), *flags)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('Создание', result.stdout)
+                self.assertIn('/project/code.py', result.stdout)
+
     def run_cli(self, *args, **kwargs):
         return subprocess.run([sys.executable, '-m', 'context_watch', *args],
                               cwd=ROOT, text=True, capture_output=True, timeout=10, **kwargs)

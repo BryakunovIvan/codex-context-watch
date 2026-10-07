@@ -3,7 +3,7 @@ from collections import Counter
 import math
 from pathlib import PurePosixPath
 
-from .attribution import analyze_call
+from .attribution import analyze_call, analyze_files
 MEDIA_TYPES = {'image', 'input_image', 'image_url', 'audio', 'input_audio',
                'output_audio', 'video', 'file', 'input_file'}
 
@@ -47,6 +47,7 @@ class Analyzer:
         self.calls = {}
         self.usage = {}
         self.metadata = {}
+        self.cwd = ''
         self.model = None
         self.window = None
         self.turn_id = None
@@ -68,7 +69,7 @@ class Analyzer:
             'turn_id': self.turn_id, 'epoch': self.epoch, 'category': category,
             'role': '', 'label': category, 'tool': '', 'call_id': '',
             'nested_tools': [], 'skill_paths': [], 'attribution': 'none',
-            'read_paths': [],
+            'read_paths': [], 'file_accesses': [],
             'text': text, 'bytes': len(text.encode('utf-8', errors='replace')),
             'characters': len(text), 'estimated_tokens': weight(text),
             'media_blocks': 0, 'replacement': False,
@@ -113,7 +114,8 @@ class Analyzer:
             entry = self._entry(text, 'tool_call', timestamp, line,
                                label=f'{name}: {text[:100]}', tool=name, call_id=call_id,
                                skill_paths=paths, nested_tools=nested,
-                               attribution=attribution, read_paths=resources, **extra)
+                               attribution=attribution, read_paths=resources,
+                               file_accesses=analyze_files(name, text, self.cwd), **extra)
             if call_id:
                 self.calls[call_id] = entry
         elif kind in ('function_call_output', 'custom_tool_call_output', 'local_shell_call_output'):
@@ -129,6 +131,7 @@ class Analyzer:
                         skill_paths=call.get('skill_paths', []),
                         nested_tools=call.get('nested_tools', []),
                         read_paths=call.get('read_paths', []),
+                        file_accesses=call.get('file_accesses', []),
                         attribution=call.get('attribution', 'unmatched'),
                         media_blocks=media, **extra)
         elif kind == 'reasoning':
@@ -175,6 +178,8 @@ class Analyzer:
         if kind == 'session_meta':
             self.metadata = {k: payload[k] for k in ('id', 'session_id', 'cwd', 'cli_version',
                              'originator', 'source', 'history_mode') if k in payload}
+            if isinstance(payload.get('cwd'), str):
+                self.cwd = payload['cwd']
             base = payload.get('base_instructions', {})
             text = base.get('text', '') if isinstance(base, dict) else base
             if isinstance(text, str) and text:
@@ -186,6 +191,8 @@ class Analyzer:
         elif kind == 'turn_context':
             self.model = payload.get('model', self.model)
             self.turn_id = payload.get('turn_id', self.turn_id)
+            if isinstance(payload.get('cwd'), str):
+                self.cwd = payload['cwd']
         elif kind == 'token_usage_record':
             self._usage(payload.get('usage', {}), payload.get('thread_token_usage', {}),
                         timestamp, kind)
@@ -230,7 +237,7 @@ class Analyzer:
             raise ValueError('scope must be active or history')
         # Replacement snapshots belong to active history, not historical cost/growth.
         entries = self.active if scope == 'active' else [e for e in self.entries if not e['replacement']]
-        categories, tools, nested_tools, skills = {}, {}, {}, {}
+        categories, tools, nested_tools, skills, files = {}, {}, {}, {}, {}
         for e in entries:
             category = categories.setdefault(e['category'], {'name': e['category'], 'count': 0,
                 'bytes': 0, 'estimated_tokens': 0})
@@ -261,6 +268,14 @@ class Analyzer:
                 skill['entry_ids'].append(e['id'])
                 skill['resources'] = list(dict.fromkeys(skill['resources'] + [p for p in e['read_paths']
                     if p == path or p.startswith(str(PurePosixPath(path).parent) + '/')]))
+            for access in e['file_accesses']:
+                file = files.setdefault(access['path'], {'path': access['path'],
+                    'operations': [], 'calls': 0, 'entry_ids': [], 'attribution': 'inferred'})
+                if access['operation'] not in file['operations']:
+                    file['operations'].append(access['operation'])
+                if e['id'] not in file['entry_ids']:
+                    file['entry_ids'].append(e['id'])
+                    file['calls'] += e['category'] == 'tool_call'
         usage = dict(self.usage)
         if usage:
             usage['new_visible_tokens'] = sum(e['estimated_tokens'] for e in self.active
@@ -279,6 +294,7 @@ class Analyzer:
             'tools': sorted(tools.values(), key=lambda x: x['estimated_tokens'], reverse=True),
             'nested_tools': sorted(nested_tools.values(), key=lambda x: x['estimated_tokens'], reverse=True),
             'skills': sorted(skills.values(), key=lambda x: x['estimated_tokens'], reverse=True),
+            'files': sorted(files.values(), key=lambda x: x['path']),
             'compactions': self.compactions, 'timeline': list(self.timeline),
             'record_count': self.record_count, 'malformed_lines': self.malformed_lines,
             'invalid_records': self.invalid_records,

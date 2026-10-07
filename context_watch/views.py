@@ -1,12 +1,12 @@
 """Pure view models shared by the curses interface and its behavior tests."""
-from .display import CATEGORY, fmt, matches, short, size
+from .display import CATEGORY, file_operations, filtered_files, fmt, matches, short, size
 
 
 VIEWS = [('largest', '1 Размер'), ('tools', '2 Инструменты'), ('skills', '3 Скиллы'),
-         ('categories', '4 Категории'), ('timeline', '5 События')]
+         ('categories', '4 Категории'), ('timeline', '5 События'), ('files', '6 Файлы')]
 
 
-def rows_for(report, view, query=''):
+def rows_for(report, view, query='', file_mode='all'):
     entries = [e for e in report['entries'] if matches(e, query)]
     rows = []
     if view in ('largest', 'timeline'):
@@ -35,6 +35,11 @@ def rows_for(report, view, query=''):
                 note = 'ОБЩИЙ вывод' if skill['shared'] else 'вывод вызова'
                 rows.append({'key': 'skill-' + skill['path'], 'skill': skill['path'],
                     'text': f"{skill['name']:30} чтений? {skill['calls']:2}  {size(skill['output_bytes']):>9} ≈{fmt(skill['estimated_tokens']):>8} {note} | {skill['path']}"})
+    elif view == 'files':
+        for file in filtered_files(report, query, file_mode):
+            rows.append({'key': 'file-' + file['path'], 'file': file['path'],
+                'operations': file['operations'],
+                'text': f"{file['path']} | {file_operations(file['operations'])} | блоков {file['calls']} [предположение]"})
     elif view == 'categories':
         for category in report['categories']:
             if not query or any(e['category'] == category['name'] for e in entries):
@@ -50,4 +55,5 @@ def related_entries(report, row):
             ('tool' in row and e['tool'] == row['tool']) or
             ('nested_tool' in row and row['nested_tool'] in e['nested_tools']) or
             ('skill' in row and row['skill'] in e['skill_paths']) or
+            ('file' in row and any(a['path'] == row['file'] for a in e.get('file_accesses', []))) or
             ('category' in row and row['category'] == e['category'])]

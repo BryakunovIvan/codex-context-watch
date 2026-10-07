@@ -46,7 +46,9 @@ def parser():
             command.add_argument('--item', required=True, help='ID записи e000001 из отчёта')
         else:
             command.add_argument('--top', type=positive_int, default=15)
-            command.add_argument('--filter', default='', help='Поиск по содержимому, инструменту или скиллу')
+            command.add_argument('--filter', default='', help='Поиск по содержимому, инструменту или пути файла/скилла')
+            command.add_argument('--files', choices=('all', 'md'), default='all',
+                                 help='Режим списка файлов: all — все, md — только .md; JSON сохраняет полный список')
         if name == 'watch':
             command.add_argument('--interval', type=positive_float, default=0.75)
             command.add_argument('--plain', action='store_true', help='Текстовые снимки вместо TUI')
@@ -101,7 +103,7 @@ def main(argv=None):
             return 0
         if args.command == 'report' or args.once:
             report = snapshot(reader, args.scope, session)
-            print(report_json(report, args.full) if args.json else render_report(report, args.top, args.filter))
+            print(report_json(report, args.full) if args.json else render_report(report, args.top, args.filter, args.files))
             return 0
         if not args.plain and not args.json and sys.stdout.isatty() and sys.stdin.isatty():
             from .tui import watch
@@ -111,7 +113,7 @@ def main(argv=None):
         while True:
             if changed:
                 report = snapshot(reader, args.scope, session)
-                print(report_json(report, args.full) if args.json else render_report(report, args.top, args.filter), flush=True)
+                print(report_json(report, args.full) if args.json else render_report(report, args.top, args.filter, args.files), flush=True)
                 if not args.json:
                     print('\n' + '─' * 72, flush=True)
             count += 1
